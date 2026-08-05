@@ -21,18 +21,17 @@ struct AboutContentView: View {
     @EnvironmentObject private var wakeAlarm: WakeAlarmStore
 
     @State private var settingMode: SleepTimerSettingMode = .duration
-    @State private var selectedDurationMinutes = 0
     @State private var selectedStopTime = Date()
     @State private var isSyncingSleepTimer = false
     @State private var hasPendingChanges = false
+    @State private var sleepDays: [SleepDaySetting] = SleepDaySetting.defaults()
+    @State private var selectedSleepWeekday = Calendar.current.component(.weekday, from: Date())
     @State private var wakeDays: [WakeDaySetting] = WakeDaySetting.defaults()
     @State private var selectedWakeWeekday = Calendar.current.component(.weekday, from: Date())
     @State private var wakeAlarmPending = false
     @State private var isSyncingWakeAlarm = false
     @State private var showStartupChannelRequiredAlert = false
     @State private var showWakeDayRequiredAlert = false
-
-    private let durationOptions = Array(stride(from: 10, through: 120, by: 10))
 
     var body: some View {
         List {
@@ -131,8 +130,17 @@ struct AboutContentView: View {
             Section("App Info") {
                 LabeledContent("Version", value: AppInfo.version)
                 LabeledContent("Supported Countries", value: AppInfo.supportedCountriesSummary)
+                Text(AppInfo.copyrightLine)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
                 Link(destination: AppInfo.privacyPolicyURL) {
                     Label("Privacy Policy", systemImage: "hand.raised")
+                }
+                Link(destination: AppInfo.supportURL) {
+                    Label("Support", systemImage: "envelope")
+                }
+                Link(destination: URL(string: "mailto:\(AppInfo.supportEmail)")!) {
+                    Label(AppInfo.supportEmail, systemImage: "at")
                 }
             }
 
@@ -156,18 +164,21 @@ struct AboutContentView: View {
             .font(.footnote)
             .foregroundStyle(.secondary)
 
-            Section("Data Source") {
-                Link(destination: URL(string: "https://www.radio-browser.info/")!) {
+            Section("Legal & Acknowledgements") {
+                Link(destination: AppInfo.radioBrowserURL) {
                     Label("Radio Browser", systemImage: "link")
                 }
-                Text("Station lists and stream URLs come from the Radio Browser open API, organized by country. Optional location only sorts which country or station appears first. Some stations may not play due to regional restrictions or temporary outages.")
+                Text("Station lists and stream URLs come from the Radio Browser open API and, when needed, official broadcaster endpoints. Broadcast audio, logos, and trademarks belong to their respective rights holders. Auradio does not claim ownership of broadcast programming. Some stations may not play due to regional restrictions or temporary outages.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                Text(AppInfo.copyrightLine)
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
 
             Section("Background Playback") {
                 Label("Lock screen and Control Center show the station and play/pause controls.", systemImage: "lock.fill")
-                Text("Radio keeps playing when the screen is off or you leave the app. Use lock screen or Control Center to pause or resume. Fully stop from the in-app player (X). On Dynamic Island devices, playback can also appear in the island.")
+                Text("Radio keeps playing when the screen is off or you leave the app. Use lock screen or Control Center to pause or resume. Fully stop from the in-app player (X).")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
@@ -177,7 +188,7 @@ struct AboutContentView: View {
             syncFromPlayer()
             syncWakeAlarmFromStore()
         }
-        .onChange(of: selectedDurationMinutes) { _, _ in
+        .onChange(of: sleepDays) { _, _ in
             guard settingMode == .duration, !isSyncingSleepTimer else { return }
             hasPendingChanges = true
         }
@@ -256,31 +267,60 @@ struct AboutContentView: View {
                 .foregroundStyle(.secondary)
 
         case .duration:
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Duration")
-                    .font(.subheadline)
+            Text("Sleep Days")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
 
-                HStack {
-                    Spacer(minLength: 0)
-                    Picker("", selection: $selectedDurationMinutes) {
-                        Text("Off")
-                            .font(.title3.weight(.medium))
-                            .tag(0)
-                        ForEach(durationOptions, id: \.self) { minutes in
-                            Text("\(minutes) min")
-                                .font(.title3.weight(.medium))
-                                .tag(minutes)
-                        }
+            sleepDayChipRow
+
+            if let selectedIndex = sleepDays.firstIndex(where: { $0.weekday == selectedSleepWeekday }) {
+                Toggle(isOn: $sleepDays[selectedIndex].isEnabled) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(sleepDays[selectedIndex].shortLabel)
+                            .font(.body.weight(.semibold))
+                        Text(sleepDayTimeLabel(sleepDays[selectedIndex]))
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
                     }
-                    .pickerStyle(.wheel)
-                    .labelsHidden()
-                    .frame(width: 132, height: 180)
-                    .clipped()
-                    Spacer(minLength: 0)
+                }
+
+                if sleepDays[selectedIndex].isEnabled {
+                    HStack {
+                        Spacer(minLength: 0)
+                        DatePicker(
+                            "",
+                            selection: Binding(
+                                get: {
+                                    Calendar.current.date(
+                                        bySettingHour: sleepDays[selectedIndex].hour,
+                                        minute: sleepDays[selectedIndex].minute,
+                                        second: 0,
+                                        of: Date()
+                                    ) ?? Date()
+                                },
+                                set: { newValue in
+                                    let calendar = Calendar.current
+                                    sleepDays[selectedIndex].hour = calendar.component(.hour, from: newValue)
+                                    sleepDays[selectedIndex].minute = calendar.component(.minute, from: newValue)
+                                }
+                            ),
+                            displayedComponents: .hourAndMinute
+                        )
+                        .labelsHidden()
+                        .datePickerStyle(.wheel)
+                        .environment(\.locale, Locale(identifier: "en_US"))
+                        .frame(width: 200, height: 140)
+                        .clipped()
+                        Spacer(minLength: 0)
+                    }
                 }
             }
 
-            Text("Playback stops automatically after the selected duration.")
+            if let next = player.nextSleepEndDate(), settingMode == .duration, !hasPendingChanges {
+                LabeledContent("Next stop", value: nextSleepLabel(next))
+            }
+
+            Text("Choose weekdays (Sun–Sat) and an end time for each day. Playback stops at that time on enabled days.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
         }
@@ -316,6 +356,63 @@ struct AboutContentView: View {
         }
     }
 
+    private var sleepDayChipRow: some View {
+        HStack(spacing: 4) {
+            ForEach(sleepDays) { day in
+                let selected = day.weekday == selectedSleepWeekday
+                Button {
+                    selectedSleepWeekday = day.weekday
+                } label: {
+                    Text(day.shortLabel)
+                        .font(.caption2.weight(.semibold))
+                        .minimumScaleFactor(0.75)
+                        .lineLimit(1)
+                        .foregroundStyle(sleepDayChipForeground(day: day, selected: selected))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 7)
+                        .background(sleepDayChipBackground(day: day, selected: selected), in: Capsule())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(day.shortLabel)
+                .accessibilityAddTraits(selected ? .isSelected : [])
+            }
+        }
+        .listRowInsets(EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16))
+    }
+
+    private func sleepDayChipForeground(day: SleepDaySetting, selected: Bool) -> Color {
+        if selected && day.isEnabled { return .white }
+        if day.isEnabled { return Color("AccentColor") }
+        return .secondary
+    }
+
+    private func sleepDayChipBackground(day: SleepDaySetting, selected: Bool) -> Color {
+        if selected && day.isEnabled { return Color("AccentColor") }
+        if day.isEnabled { return Color("AccentColor").opacity(0.18) }
+        return Color(.tertiarySystemFill)
+    }
+
+    private func sleepDayTimeLabel(_ day: SleepDaySetting) -> String {
+        guard day.isEnabled else { return "Off" }
+        let date = Calendar.current.date(
+            bySettingHour: day.hour,
+            minute: day.minute,
+            second: 0,
+            of: Date()
+        ) ?? Date()
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "h:mm a"
+        return formatter.string(from: date)
+    }
+
+    private func nextSleepLabel(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "MMM d (EEE) h:mm a"
+        return formatter.string(from: date)
+    }
+
     private var sleepTimerPreview: some View {
         VStack(alignment: .leading, spacing: 12) {
             Picker("Mode", selection: .constant(SleepTimerSettingMode.duration)) {
@@ -327,7 +424,7 @@ struct AboutContentView: View {
             .controlSize(.small)
             .disabled(true)
 
-            Text("Duration")
+            Text("Duration — set end times by weekday")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
         }
@@ -604,12 +701,13 @@ struct AboutContentView: View {
 
         switch settingMode {
         case .duration:
-            player.setSleepTimer(minutes: selectedDurationMinutes)
+            player.setSleepTimerWeekly(sleepDays)
         case .scheduledTime:
             player.setSleepTimerUntil(time: selectedStopTime)
         }
 
         hasPendingChanges = false
+        syncFromPlayer()
     }
 
     private func syncFromPlayer() {
@@ -620,17 +718,20 @@ struct AboutContentView: View {
             settingMode = mode == .scheduledTime ? .scheduledTime : .duration
         }
 
-        if player.isSleepTimerActive {
-            selectedDurationMinutes = player.sleepTimerMode == .duration ? player.sleepTimerMinutes : selectedDurationMinutes
-            if let savedTime = player.savedSleepTimerScheduledTime {
-                selectedStopTime = savedTime
-            }
-            hasPendingChanges = false
+        sleepDays = SleepDaySetting.normalize(player.sleepDays)
+        if let firstEnabled = sleepDays.first(where: \.isEnabled)?.weekday {
+            selectedSleepWeekday = firstEnabled
         } else {
-            selectedDurationMinutes = 0
-            selectedStopTime = defaultStopTime()
-            hasPendingChanges = false
+            selectedSleepWeekday = Calendar.current.component(.weekday, from: Date())
         }
+
+        if player.isSleepTimerActive, let savedTime = player.savedSleepTimerScheduledTime {
+            selectedStopTime = savedTime
+        } else if settingMode == .scheduledTime {
+            selectedStopTime = defaultStopTime()
+        }
+
+        hasPendingChanges = false
     }
 
     private func defaultStopTime() -> Date {

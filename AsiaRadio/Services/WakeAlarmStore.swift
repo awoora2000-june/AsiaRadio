@@ -38,6 +38,41 @@ struct WakeDaySetting: Codable, Equatable, Identifiable {
     }
 }
 
+/// Sleep Timer weekly end-time slot. Same weekday convention as Wake Radio.
+struct SleepDaySetting: Codable, Equatable, Identifiable {
+    var weekday: Int
+    var isEnabled: Bool
+    var hour: Int
+    var minute: Int
+
+    var id: Int { weekday }
+
+    static let shortLabels = WakeDaySetting.shortLabels
+
+    var shortLabel: String {
+        guard (1...7).contains(weekday) else { return "?" }
+        return Self.shortLabels[weekday - 1]
+    }
+
+    static func defaults(hour: Int = 23, minute: Int = 0, allEnabled: Bool = false) -> [SleepDaySetting] {
+        (1...7).map {
+            SleepDaySetting(weekday: $0, isEnabled: allEnabled, hour: hour, minute: minute)
+        }
+    }
+
+    static func normalize(_ days: [SleepDaySetting], fallbackHour: Int = 23, fallbackMinute: Int = 0) -> [SleepDaySetting] {
+        let byWeekday = Dictionary(uniqueKeysWithValues: days.map { ($0.weekday, $0) })
+        return (1...7).map { weekday in
+            byWeekday[weekday] ?? SleepDaySetting(
+                weekday: weekday,
+                isEnabled: false,
+                hour: fallbackHour,
+                minute: fallbackMinute
+            )
+        }
+    }
+}
+
 @MainActor
 final class WakeAlarmStore: ObservableObject {
     static let shared = WakeAlarmStore()

@@ -18,6 +18,7 @@ final class AudioPlayerService: ObservableObject {
     @Published private(set) var sleepTimerMinutes = 0
     @Published private(set) var sleepTimerRemainingSeconds: Int?
     @Published private(set) var sleepTimerMode: SleepTimerMode?
+    @Published private(set) var sleepDays: [SleepDaySetting] = SleepDaySetting.defaults()
 
     private var player: AVPlayer?
     private var statusObserver: NSKeyValueObservation?
@@ -48,6 +49,7 @@ final class AudioPlayerService: ObservableObject {
     private let sleepTimerModeKey = "sleep_timer_mode_v1"
     private let sleepTimerScheduledHourKey = "sleep_timer_scheduled_hour_v1"
     private let sleepTimerScheduledMinuteKey = "sleep_timer_scheduled_minute_v1"
+    private let sleepTimerDaysKey = "sleep_timer_days_v1"
 
     private init() {
         NowPlayingManager.shared.configure(player: self)
@@ -55,6 +57,7 @@ final class AudioPlayerService: ObservableObject {
         observeInterruptions()
         observeRouteChanges()
         observeMediaReset()
+        loadSleepDays()
         restoreSleepTimerIfNeeded()
     }
 
@@ -159,21 +162,36 @@ final class AudioPlayerService: ObservableObject {
         currentStation = nil
         isPlaying = false
         isBuffering = false
-        clearSleepTimer()
+        clearSleepTimer(clearDays: false)
         NowPlayingManager.shared.clear()
         WakeAlarmStore.shared.noteUserStoppedPlayback()
     }
 
+    /// Stops audio when the sleep timer fires without wiping the weekly schedule.
+    private func stopPlaybackForSleepTimer() {
+        playbackTask?.cancel()
+        connectionTimeoutTask?.cancel()
+        playbackGeneration += 1
+        wantsPlayback = false
+        lastPlaybackSignature = ""
+        player?.pause()
+        tearDownPlayer()
+        isPlaying = false
+        isBuffering = false
+        NowPlayingManager.shared.update(station: currentStation, isPlaying: false)
+    }
+
     func setSleepTimer(minutes: Int) {
         if minutes == 0 {
-            clearSleepTimer()
+            clearSleepTimer(clearDays: false)
             return
         }
 
         if minutes == sleepTimerMinutes,
            sleepTimerMode == .duration,
            let endsAt = sleepTimerEndsAt,
-           endsAt > Date() {
+           endsAt > Date(),
+           !sleepDays.contains(where: \.isEnabled) {
             sleepTimerRemainingSeconds = Int(ceil(endsAt.timeIntervalSinceNow))
             if sleepTimerTickTask == nil {
                 startSleepTimerTick()
@@ -183,7 +201,26 @@ final class AudioPlayerService: ObservableObject {
         }
 
         let endsAt = Date().addingTimeInterval(TimeInterval(minutes * 60))
-        activateSleepTimer(endsAt: endsAt, mode: .duration, configuredMinutes: minutes)
+        activateSleepTimer(endsAt: endsAt, mode: .duration, configuredMinutes: minutes, rescheduleWeeklyAfterFire: false)
+    }
+
+    /// Duration mode: per-weekday end times (recurring), like Wake Radio.
+    func setSleepTimerWeekly(_ days: [SleepDaySetting]) {
+        sleepDays = SleepDaySetting.normalize(days)
+        persistSleepDays()
+
+        guard sleepDays.contains(where: \.isEnabled),
+              let endsAt = nextSleepEndDate() else {
+            clearSleepTimer(clearDays: false)
+            return
+        }
+
+        activateSleepTimer(
+            endsAt: endsAt,
+            mode: .duration,
+            configuredMinutes: nil,
+            rescheduleWeeklyAfterFire: true
+        )
     }
 
     func setSleepTimerUntil(time: Date) {
@@ -197,7 +234,8 @@ final class AudioPlayerService: ObservableObject {
             mode: .scheduledTime,
             configuredMinutes: nil,
             scheduledHour: components.hour,
-            scheduledMinute: components.minute
+            scheduledMinute: components.minute,
+            rescheduleWeeklyAfterFire: false
         )
     }
 
@@ -206,7 +244,8 @@ final class AudioPlayerService: ObservableObject {
         mode: SleepTimerMode,
         configuredMinutes: Int?,
         scheduledHour: Int? = nil,
-        scheduledMinute: Int? = nil
+        scheduledMinute: Int? = nil,
+        rescheduleWeeklyAfterFire: Bool
     ) {
         sleepTimerTask?.cancel()
         sleepTimerTickTask?.cancel()
@@ -224,8 +263,7 @@ final class AudioPlayerService: ObservableObject {
             try? await Task.sleep(nanoseconds: UInt64(remaining) * 1_000_000_000)
             guard !Task.isCancelled else { return }
             await MainActor.run {
-                self.stop()
-                WakeAlarmStore.shared.onSleepTimerStopped()
+                self.handleSleepTimerFired(rescheduleWeekly: rescheduleWeeklyAfterFire && mode == .duration)
             }
         }
 
@@ -234,6 +272,39 @@ final class AudioPlayerService: ObservableObject {
         if isPlaying {
             NowPlayingManager.shared.startRefresh()
         }
+    }
+
+    private func handleSleepTimerFired(rescheduleWeekly: Bool) {
+        stopPlaybackForSleepTimer()
+        WakeAlarmStore.shared.onSleepTimerStopped()
+        if rescheduleWeekly, sleepDays.contains(where: \.isEnabled), let next = nextSleepEndDate() {
+            activateSleepTimer(
+                endsAt: next,
+                mode: .duration,
+                configuredMinutes: nil,
+                rescheduleWeeklyAfterFire: true
+            )
+        } else {
+            clearSleepTimer(clearDays: false)
+        }
+    }
+
+    func nextSleepEndDate(from date: Date = Date()) -> Date? {
+        let calendar = Calendar.current
+        for offset in 0..<8 {
+            guard let dayDate = calendar.date(byAdding: .day, value: offset, to: date) else { continue }
+            let weekday = calendar.component(.weekday, from: dayDate)
+            guard let setting = sleepDays.first(where: { $0.weekday == weekday && $0.isEnabled }) else { continue }
+            var components = calendar.dateComponents([.year, .month, .day], from: dayDate)
+            components.hour = setting.hour
+            components.minute = setting.minute
+            components.second = 0
+            guard let candidate = calendar.date(from: components) else { continue }
+            if candidate.timeIntervalSince(date) > 3 {
+                return candidate
+            }
+        }
+        return nil
     }
 
     private func nextOccurrence(of time: Date) -> Date {
@@ -278,12 +349,12 @@ final class AudioPlayerService: ObservableObject {
         sleepTimerMode = .duration
         persistSleepTimer()
 
+        let weekly = sleepDays.contains(where: \.isEnabled)
         sleepTimerTask = Task {
             try? await Task.sleep(nanoseconds: UInt64(newRemaining) * 1_000_000_000)
             guard !Task.isCancelled else { return }
             await MainActor.run {
-                self.stop()
-                WakeAlarmStore.shared.onSleepTimerStopped()
+                self.handleSleepTimerFired(rescheduleWeekly: weekly)
             }
         }
 
@@ -378,7 +449,7 @@ final class AudioPlayerService: ObservableObject {
         return endsAt > Date()
     }
 
-    private func clearSleepTimer() {
+    private func clearSleepTimer(clearDays: Bool = false) {
         sleepTimerTask?.cancel()
         sleepTimerTickTask?.cancel()
         sleepTimerTask = nil
@@ -392,19 +463,37 @@ final class AudioPlayerService: ObservableObject {
         UserDefaults.standard.removeObject(forKey: sleepTimerModeKey)
         UserDefaults.standard.removeObject(forKey: sleepTimerScheduledHourKey)
         UserDefaults.standard.removeObject(forKey: sleepTimerScheduledMinuteKey)
+        if clearDays {
+            sleepDays = SleepDaySetting.defaults()
+            UserDefaults.standard.removeObject(forKey: sleepTimerDaysKey)
+        }
         refreshNowPlaying()
     }
 
     func cancelSleepTimer() {
-        clearSleepTimer()
+        clearSleepTimer(clearDays: false)
+    }
+
+    private func loadSleepDays() {
+        guard let data = UserDefaults.standard.data(forKey: sleepTimerDaysKey),
+              let decoded = try? JSONDecoder().decode([SleepDaySetting].self, from: data) else {
+            sleepDays = SleepDaySetting.defaults()
+            return
+        }
+        sleepDays = SleepDaySetting.normalize(decoded)
+    }
+
+    private func persistSleepDays() {
+        if let data = try? JSONEncoder().encode(sleepDays) {
+            UserDefaults.standard.set(data, forKey: sleepTimerDaysKey)
+        }
     }
 
     var sleepTimerEndsAtTimeString: String? {
         guard let sleepTimerEndsAt, isSleepTimerActive else { return nil }
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeStyle = .short
-        formatter.dateStyle = .none
+        formatter.dateFormat = "h:mm a"
         return formatter.string(from: sleepTimerEndsAt)
     }
 
@@ -421,6 +510,7 @@ final class AudioPlayerService: ObservableObject {
         UserDefaults.standard.set(sleepTimerEndsAt.timeIntervalSince1970, forKey: sleepTimerEndsAtKey)
         UserDefaults.standard.set(sleepTimerMinutes, forKey: sleepTimerMinutesKey)
         UserDefaults.standard.set(sleepTimerMode.rawValue, forKey: sleepTimerModeKey)
+        persistSleepDays()
 
         if sleepTimerMode == .scheduledTime {
             let hour = scheduledHour ?? Calendar.current.component(.hour, from: sleepTimerEndsAt)
@@ -434,32 +524,42 @@ final class AudioPlayerService: ObservableObject {
     }
 
     private func restoreSleepTimerIfNeeded() {
-        let endsAtEpoch = UserDefaults.standard.double(forKey: sleepTimerEndsAtKey)
-        let minutes = UserDefaults.standard.integer(forKey: sleepTimerMinutesKey)
-        guard endsAtEpoch > 0 else { return }
+        let mode = UserDefaults.standard.string(forKey: sleepTimerModeKey)
+            .flatMap(SleepTimerMode.init(rawValue:))
 
-        let endsAt = Date(timeIntervalSince1970: endsAtEpoch)
-        guard endsAt > Date() else {
-            clearSleepTimer()
+        let endsAtEpoch = UserDefaults.standard.double(forKey: sleepTimerEndsAtKey)
+        if endsAtEpoch > 0 {
+            let endsAt = Date(timeIntervalSince1970: endsAtEpoch)
+            if endsAt > Date() {
+                let minutes = UserDefaults.standard.integer(forKey: sleepTimerMinutesKey)
+                sleepTimerMinutes = minutes
+                sleepTimerEndsAt = endsAt
+                sleepTimerMode = mode ?? .duration
+                sleepTimerRemainingSeconds = Int(ceil(endsAt.timeIntervalSinceNow))
+                let weekly = (mode == .duration) && sleepDays.contains(where: \.isEnabled)
+                activateSleepTimer(
+                    endsAt: endsAt,
+                    mode: sleepTimerMode ?? .duration,
+                    configuredMinutes: minutes > 0 ? minutes : nil,
+                    rescheduleWeeklyAfterFire: weekly
+                )
+                return
+            }
+        }
+
+        // Weekly schedule: arm the next end even if the previous fire time already passed.
+        if mode == .duration, sleepDays.contains(where: \.isEnabled),
+           let next = nextSleepEndDate() {
+            activateSleepTimer(
+                endsAt: next,
+                mode: .duration,
+                configuredMinutes: nil,
+                rescheduleWeeklyAfterFire: true
+            )
             return
         }
 
-        let mode = UserDefaults.standard.string(forKey: sleepTimerModeKey)
-            .flatMap(SleepTimerMode.init(rawValue:)) ?? .duration
-
-        sleepTimerMinutes = minutes
-        sleepTimerEndsAt = endsAt
-        sleepTimerMode = mode
-        sleepTimerRemainingSeconds = Int(ceil(endsAt.timeIntervalSinceNow))
-        startSleepTimerTick()
-
-        sleepTimerTask?.cancel()
-        sleepTimerTask = Task {
-            let remaining = max(1, Int(ceil(endsAt.timeIntervalSinceNow)))
-            try? await Task.sleep(nanoseconds: UInt64(remaining) * 1_000_000_000)
-            guard !Task.isCancelled else { return }
-            await MainActor.run { self.stop() }
-        }
+        clearSleepTimer(clearDays: false)
     }
 
     func prepareForBackground() {

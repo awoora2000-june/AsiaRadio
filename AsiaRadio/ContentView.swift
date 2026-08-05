@@ -73,6 +73,16 @@ struct ContentView: View {
             .navigationDestination(isPresented: $showPlayer) {
                 PlayerView()
             }
+            .navigationDestination(isPresented: $showAbout) {
+                AboutContentView()
+                    .environmentObject(player)
+                    .environmentObject(startupChannel)
+                    .environmentObject(wakeAlarm)
+                    .environmentObject(premium)
+                    .navigationTitle("Settings")
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar(.visible, for: .navigationBar)
+            }
         }
         .environmentObject(favorites)
         .environmentObject(recent)
@@ -103,22 +113,6 @@ struct ContentView: View {
             }
             .presentationDetents([.medium, .large])
             .presentationDragIndicator(.visible)
-        }
-        .sheet(isPresented: $showAbout) {
-            NavigationStack {
-                AboutContentView()
-                    .environmentObject(player)
-                    .environmentObject(startupChannel)
-                    .environmentObject(wakeAlarm)
-                    .environmentObject(premium)
-                    .navigationTitle("Settings")
-                    .navigationBarTitleDisplayMode(.inline)
-                    .toolbar {
-                        ToolbarItem(placement: .topBarTrailing) {
-                            Button("Close") { showAbout = false }
-                        }
-                    }
-            }
         }
         .task {
             configureWakeAlarm()
