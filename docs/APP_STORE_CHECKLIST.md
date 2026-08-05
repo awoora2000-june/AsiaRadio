@@ -83,14 +83,21 @@ ASC “Content Rights” checkbox: select that you have the rights to use the co
 
 ## Pre-upload verification log
 
-Update this section when checks complete.
-
 | Check | Status |
 |-------|--------|
-| Commit legal/source updates to `main` | pending |
-| Push to `awoora2000-june/AsiaRadio` | pending |
-| GitHub Pages `/docs` live | pending |
-| Privacy/Support URLs return HTTP 200 HTML | pending |
-| `Release` configuration build succeeds | pending |
-| Debug premium unlock not in Release | pending |
-| Secrets scan clean | pending |
+| Commit legal/source updates to `main` | done (`40ef879`, merge `a1e1ebd`) |
+| Push to `awoora2000-june/AsiaRadio` | done |
+| GitHub Pages `/` (root) enabled | done (already on `main` / `/`) |
+| Privacy/Support URLs return HTTP 200 HTML | verify after Pages rebuild |
+| `Release` configuration build succeeds | done |
+| Debug premium unlock not in Release (`#else false`) | done |
+| Secrets scan clean | done |
+
+### Still manual in App Store Connect / Xcode
+
+- [ ] Paste Privacy & Support URLs into ASC App Information
+- [ ] Fill App Privacy using the questionnaire table above
+- [ ] Confirm Content Rights with the declaration above
+- [ ] Archive **Release**, upload build, attach to version
+- [ ] Confirm IAP `auradio_premium` + screenshots/description
+- [ ] Confirm team `8TTJ4963GC` is paid Apple Developer Program
